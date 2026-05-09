@@ -1,0 +1,2 @@
+[console_scripts]
+airprompt = airprompt.main:main

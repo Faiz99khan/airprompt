@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "airprompt"
+version = "0.1.0"
+description = "Hands-free voice conversation with Claude Opus (open-source STT/TTS)."
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk>=0.1.0",
+    "faster-whisper>=1.0.3",
+    "kokoro>=0.9.4",
+    "silero-vad>=5.1.2",
+    "sounddevice>=0.4.7",
+    "soundfile>=0.12.1",
+    "numpy>=1.24,<2",
+]
+
+[project.scripts]
+airprompt = "airprompt.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
