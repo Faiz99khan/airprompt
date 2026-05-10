@@ -27,8 +27,10 @@ from pathlib import Path
 
 import numpy as np
 
+from .attachments import load_attachment
 from .audio_io import AudioCapture, AudioPlayback
 from .llm import InterviewerLLM
+from .personality import bootstrap_user_dir, load as load_personality
 from .stt import Transcriber
 from .tts import Synthesizer
 from .vad import Endpointer
@@ -45,13 +47,24 @@ class State(enum.Enum):
 class Orchestrator:
     def __init__(
         self,
+        personality_name: str,
         role: str,
-        resume_path: Path | None = None,
+        attach_specs: list[str] | None = None,
+        continue_path: Path | None = None,
         input_device: int | None = None,
         output_device: int | None = None,
     ) -> None:
+        bootstrap_user_dir()
+        self.personality = load_personality(personality_name)
         self.role = role
-        self.resume_path = resume_path
+        self.attachments = [load_attachment(s) for s in (attach_specs or [])]
+        if self.attachments and not self.personality.uses_attachments:
+            log.warning(
+                "personality %r doesn't declare uses_attachments=true; "
+                "attachments will only appear if its template references {attachments_section}",
+                self.personality.name,
+            )
+        self.continue_path = continue_path
         self.input_device = input_device
         self.output_device = output_device
 
@@ -173,10 +186,18 @@ class Orchestrator:
 
         capture = AudioCapture(out_queue=self.raw_audio_q, loop=loop, device=self.input_device)
         self._playback = AudioPlayback(device=self.output_device)
-        capture.start()
+        # Playback can start now — it doesn't accumulate; we only feed it when speaking.
+        # Mic is deferred until the VAD task is running and history has been replayed,
+        # otherwise startup latency (model load + Claude history replay on --continue)
+        # overflows the input queue.
         self._playback.start()
 
-        async with InterviewerLLM(self.role, resume_path=self.resume_path) as llm:
+        async with InterviewerLLM(
+            personality=self.personality,
+            role=self.role,
+            attachments=self.attachments,
+            continue_path=self.continue_path,
+        ) as llm:
             self._llm = llm
             log.info("session file: %s", llm.session_path)
 
@@ -185,8 +206,14 @@ class Orchestrator:
                 asyncio.create_task(self.stt_task(transcriber), name="stt"),
             ]
 
+            # Now that consumers are alive, open the mic.
+            capture.start()
+
+            attach_note = (
+                f" + {len(self.attachments)} attachment(s)" if self.attachments else ""
+            )
             print(
-                f"\n\033[32m[ready]\033[0m Interviewer for: {self.role}. "
+                f"\n\033[32m[ready]\033[0m {self.personality.name} for: {self.role}{attach_note}. "
                 "Speak when ready. Interrupt anytime. Ctrl+C to end.\n"
             )
             try:

@@ -30,6 +30,16 @@ class AudioCapture:
 
     def __post_init__(self) -> None:
         self._stream: sd.InputStream | None = None
+        self._dropped: int = 0
+
+    def _enqueue(self, frame: np.ndarray) -> None:
+        try:
+            self.out_queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            # Consumer stalled or hasn't started yet — drop and report periodically.
+            self._dropped += 1
+            if self._dropped == 1 or self._dropped % 50 == 0:
+                log.warning("mic frame dropped (queue full); total dropped=%d", self._dropped)
 
     def _callback(self, indata, frames, time_info, status) -> None:
         if status:
@@ -38,7 +48,7 @@ class AudioCapture:
         mono = indata[:, 0] if indata.ndim > 1 else indata
         pcm16 = (np.clip(mono, -1.0, 1.0) * 32767).astype(np.int16)
         try:
-            self.loop.call_soon_threadsafe(self.out_queue.put_nowait, pcm16.copy())
+            self.loop.call_soon_threadsafe(self._enqueue, pcm16.copy())
         except RuntimeError:
             # loop closed during shutdown
             pass

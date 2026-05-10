@@ -1,6 +1,10 @@
 # airprompt — hands-free voice conversation with Claude Opus
 
-Low-latency, continuous-listen voice app that uses Claude Opus 4.7 as a mock interviewer.
+Low-latency, continuous-listen voice app that uses Claude Opus 4.7. The persona
+is driven by **user-editable personality presets** (interviewer, tutor, debate
+partner, …) and can be grounded in **attached personal files** (resume,
+portfolio brief, study notes — `.txt` / `.md` / `.pdf`).
+
 All speech models are open source and run locally on GPU. The LLM uses the Claude
 Agent SDK piggybacking on your existing `claude` CLI auth (Pro subscription works).
 
@@ -50,19 +54,93 @@ python -m airprompt --role "Python backend engineer"
 Speak when you see `[ready]`. The mic listens continuously; talking ends when you pause
 for ~400 ms. Ctrl+C to end.
 
+### Attach personal files
+
+Pass `--attach` (repeatable) to give the persona context about you. Supported
+formats: `.txt`, `.md`, `.pdf`.
+
+```bash
+# Mock interview grounded in your resume
+python -m airprompt --role "Backend Engineer" --attach resume=~/docs/cv.pdf
+
+# Multiple files with optional labels (label= prefix)
+python -m airprompt \
+  --attach resume=~/docs/cv.pdf \
+  --attach portfolio=~/docs/projects.md \
+  --attach ~/docs/notes.txt        # bare path → label is the file stem
+```
+
+The interviewer (or any personality whose template references
+`{attachments_section}`) will probe specific projects, roles, and timelines from
+the file rather than asking generic questions. Files are capped at ~8k chars
+each, ~24k cumulative — long PDFs get truncated with a warning.
+
+### Personalities (presets)
+
+The default `interviewer` preset is auto-installed on first run to:
+
+```
+~/.config/airprompt/personalities/interviewer.md
+```
+
+Edit that file to tune the interviewer, or drop in a new `<name>.md` to define a
+new personality and select it with `--personality <name>`. Each file is markdown
+with YAML frontmatter:
+
+```markdown
+---
+name: tutor
+description: Patient tutor that adapts to the learner's level
+uses_attachments: true       # set false if this persona doesn't use --attach
+defaults:
+  effort: xhigh              # passed to the Agent SDK
+---
+You are a patient tutor for {role}.
+
+{attachments_section}
+
+Ask one question at a time, ...
+```
+
+Two placeholders are available in the template body:
+
+| Placeholder | Filled with |
+|---|---|
+| `{role}` | The `--role` argument (free-form string) |
+| `{attachments_section}` | Demarcated, labeled blocks of any `--attach` files. Empty string when none. |
+
+List what's installed:
+
+```bash
+python -m airprompt --list-personalities
+```
+
 ### Resume a prior session
 
 ```bash
-python -m airprompt --resume ~/.local/share/airprompt/sessions/session-20260509-101500.json
+python -m airprompt --continue ~/.local/share/airprompt/sessions/session-20260509-101500.json
 ```
+
+The session file remembers the `personality`, `role`, and `--attach` paths used
+when it was created. By default `--continue` re-uses all of them, so the bot
+keeps its full context (including your resume) without re-typing flags. Pass
+`--personality`, `--role`, or `--attach` explicitly to override individual
+values for the resumed session.
+
+(`--resume` still works as a deprecated alias for one release; prefer `--continue`.)
 
 ### Other flags
 
 ```
+--personality NAME        personality preset (default: interviewer)
+--role STR                role/topic injected into the personality template
+--attach [LABEL=]PATH     attach a personal file; repeatable
+--continue PATH           resume a prior session JSON
+--list-personalities      list available personalities and exit
 --list-devices            list audio devices
 --input-device N          pick mic by index
 --output-device N         pick speaker by index
---log-level DEBUG         verbose logging
+--log-level DEBUG         verbose logging (use DEBUG to see the rendered system prompt)
 ```
 
 ## Smoke tests
@@ -81,13 +159,17 @@ python -m airprompt.stt me.wav
 
 ```
 src/airprompt/
-  audio_io.py     mic/speaker streams + thread-asyncio bridge
-  vad.py          Silero VAD endpointing
-  stt.py          faster-whisper
-  tts.py          Kokoro
-  llm.py          Agent SDK + sentence splitter + persona + history
-  orchestrator.py state machine + queues + tasks
-  main.py         CLI entry
+  audio_io.py        mic/speaker streams + thread-asyncio bridge
+  vad.py             Silero VAD endpointing
+  stt.py             faster-whisper
+  tts.py             Kokoro
+  llm.py             Agent SDK + sentence splitter + persona + history
+  personality.py     load / parse / render personality presets
+  attachments.py     load .txt/.md/.pdf into the prompt
+  personalities/     packaged default presets (auto-copied to ~/.config/airprompt/)
+    interviewer.md
+  orchestrator.py    state machine + queues + tasks
+  main.py            CLI entry
 ```
 
 ## Latency notes

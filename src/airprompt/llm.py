@@ -12,32 +12,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator
 
+from .attachments import Attachment, render_attachments_section
+from .personality import Personality, render as render_personality
+
 log = logging.getLogger(__name__)
 
 MODEL = "claude-opus-4-7"
 SESSIONS_DIR = Path.home() / ".local/share/airprompt/sessions"
-
-
-def interviewer_system_prompt(role: str) -> str:
-    return (
-        f"You are conducting a realistic mock job interview for the position of: {role}.\n\n"
-        "How to conduct the interview:\n"
-        "- Ask one focused question at a time, then wait for the candidate's reply.\n"
-        "- Mix question types: behavioral, technical/role-specific, situational, and follow-ups that probe their answers.\n"
-        "- Adapt difficulty and direction based on what the candidate says.\n"
-        "- Reference earlier answers when useful.\n"
-        "- After ~8–12 questions OR when the candidate says \"end interview\" / \"that's all\", give structured feedback: strengths, weaknesses, specific examples from their answers, and a hire/no-hire recommendation with reasoning.\n\n"
-        "CRITICAL — be concise. This is a SPOKEN conversation, not a written essay:\n"
-        "- Default reply length: 1–3 short sentences. Most replies should be under 30 words.\n"
-        "- A typical question is one sentence. A brief acknowledgement (\"Got it.\" / \"Interesting.\") plus a follow-up question is the norm.\n"
-        "- DO NOT narrate, summarize verbosely, or restate what the candidate just said back to them.\n"
-        "- If the candidate asks \"what were we discussing?\" or similar, give a ONE-SENTENCE recap and immediately ask the next/pending question. Do not list multiple prior points.\n"
-        "- The end-of-interview feedback is the ONLY time longer replies are appropriate.\n\n"
-        "Voice formatting rules (spoken aloud by TTS):\n"
-        "- Plain conversational prose only. NO markdown, bullets, headers, code blocks, asterisks, or numbered lists.\n"
-        "- No emojis or non-speakable characters.\n"
-        "- Spell out numbers naturally as a person would say them."
-    )
 
 
 @dataclass
@@ -85,17 +66,24 @@ class InterviewerLLM:
 
     def __init__(
         self,
+        personality: Personality,
         role: str,
+        attachments: list[Attachment] | None = None,
         session_path: Path | None = None,
-        resume_path: Path | None = None,
+        continue_path: Path | None = None,
     ) -> None:
+        self.personality = personality
         self.role = role
+        self.attachments = attachments or []
         self.history: list[Turn] = []
+        self._system_prompt = render_personality(
+            personality, role, render_attachments_section(self.attachments)
+        )
         # Resuming: load prior turns NOW (so __aenter__ can replay them),
         # and keep writing to the same file so the conversation stays in one place.
-        if resume_path is not None and resume_path.exists():
-            self.load_history(resume_path)
-            self.session_path = resume_path
+        if continue_path is not None and continue_path.exists():
+            self.load_history(continue_path)
+            self.session_path = continue_path
         else:
             self.session_path = session_path or new_session_path()
         self._client = None
@@ -104,15 +92,21 @@ class InterviewerLLM:
     async def __aenter__(self) -> "InterviewerLLM":
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
+        effort = self.personality.defaults.get("effort", "xhigh")
+        model = self.personality.defaults.get("model", MODEL)
         options = ClaudeAgentOptions(
-            model=MODEL,
-            effort="xhigh",
-            system_prompt=interviewer_system_prompt(self.role),
+            model=model,
+            effort=effort,
+            system_prompt=self._system_prompt,
             include_partial_messages=True,
         )
         self._client_ctx = ClaudeSDKClient(options=options)
         self._client = await self._client_ctx.__aenter__()
-        log.info("Claude Agent SDK session started (model=%s)", MODEL)
+        log.info(
+            "Claude Agent SDK session started (model=%s, personality=%s, role=%s, attachments=%d)",
+            model, self.personality.name, self.role, len(self.attachments),
+        )
+        log.debug("system prompt:\n%s", self._system_prompt)
         if self.history:
             await self._replay_history()
         return self
@@ -208,14 +202,23 @@ class InterviewerLLM:
         if not path.exists():
             return
         data = json.loads(path.read_text())
-        self.history = [Turn(**d) for d in data]
+        # Backwards-compat: old sessions are a flat list of turns.
+        turns = data["turns"] if isinstance(data, dict) else data
+        self.history = [Turn(**d) for d in turns]
         log.info("loaded %d turns from %s", len(self.history), path)
 
     def _save(self) -> None:
         if self.session_path is None:
             return
         self.session_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = [t.__dict__ for t in self.history]
+        payload = {
+            "personality": self.personality.name,
+            "role": self.role,
+            "attachments": [
+                {"label": a.label, "path": str(a.path)} for a in self.attachments
+            ],
+            "turns": [t.__dict__ for t in self.history],
+        }
         self.session_path.write_text(json.dumps(payload, indent=2))
 
 
