@@ -150,6 +150,7 @@ class InterviewerLLM:
         buf = ""
         full_text = ""
         seen_text = ""
+        yielded_any = False
 
         try:
             async for msg in self._client.receive_response():
@@ -176,8 +177,14 @@ class InterviewerLLM:
                     continue
                 buf += new_text
                 full_text += new_text
-                sentences, buf = emit_sentences(buf, min_len=40, force_flush=False)
+                # First sentence uses a low threshold so short openers
+                # ("Sure.", "Got it.", "Makes sense.") emit immediately
+                # instead of being glued to the next sentence. 5 still skips
+                # common abbreviations (Mr., U.S., i.e., e.g., Inc.).
+                min_len = 5 if not yielded_any else 40
+                sentences, buf = emit_sentences(buf, min_len=min_len, force_flush=False)
                 for s in sentences:
+                    yielded_any = True
                     yield s
 
             sentences, buf = emit_sentences(buf, min_len=1, force_flush=True)

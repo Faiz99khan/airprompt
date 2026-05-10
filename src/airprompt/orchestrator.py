@@ -134,15 +134,55 @@ class Orchestrator:
     async def _run_turn(self, user_text: str) -> None:
         assert self._llm and self._synth and self._playback
         t0 = time.perf_counter()
-        first = True
         print("\033[35m[claude]\033[0m ", end="", flush=True)
+
+        # 3-stage pipeline so the LLM keeps streaming while TTS synthesizes,
+        # and synth of sentence N+1 runs while sentence N is still playing.
+        #     stream_reply ─► sentence_q ─► synth ─► audio_q ─► playback
+        # producer task drains the LLM, synth task drains sentence_q, this
+        # coroutine drains audio_q. Sentinel (None) propagates end-of-stream.
+        sentence_q: asyncio.Queue[str | None] = asyncio.Queue(maxsize=8)
+        audio_q: asyncio.Queue[tuple[str, np.ndarray] | None] = asyncio.Queue(maxsize=2)
+        first_logged = False
+
+        async def produce() -> None:
+            nonlocal first_logged
+            try:
+                async for sentence in self._llm.stream_reply(user_text):
+                    if not first_logged:
+                        log.info("[turn] LLM first sentence %d ms", int((time.perf_counter() - t0) * 1000))
+                        first_logged = True
+                    await sentence_q.put(sentence)
+            finally:
+                try:
+                    sentence_q.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
+
+        async def synthesize() -> None:
+            try:
+                while True:
+                    sentence = await sentence_q.get()
+                    if sentence is None:
+                        break
+                    audio = await asyncio.to_thread(self._synth.synth, sentence)
+                    await audio_q.put((sentence, audio))
+            finally:
+                try:
+                    audio_q.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
+
+        prod_task = asyncio.create_task(produce(), name="turn-produce")
+        synth_task = asyncio.create_task(synthesize(), name="turn-synth")
+
         try:
-            async for sentence in self._llm.stream_reply(user_text):
-                if first:
-                    log.info("[turn] LLM first sentence %d ms", int((time.perf_counter() - t0) * 1000))
-                    first = False
+            while True:
+                item = await audio_q.get()
+                if item is None:
+                    break
+                sentence, audio = item
                 print(sentence + " ", end="", flush=True)
-                audio = await asyncio.to_thread(self._synth.synth, sentence)
                 if audio.size == 0:
                     continue
                 if self.state != State.SPEAKING:
@@ -155,6 +195,10 @@ class Orchestrator:
             print()
             log.info("turn cancelled (barge-in)")
             raise
+        finally:
+            prod_task.cancel()
+            synth_task.cancel()
+            await asyncio.gather(prod_task, synth_task, return_exceptions=True)
 
     async def _barge_in(self) -> None:
         if self._turn_task is None or self._turn_task.done():
