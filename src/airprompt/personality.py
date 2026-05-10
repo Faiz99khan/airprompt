@@ -19,6 +19,7 @@ with the wheel and are copied into the user dir on first run.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,24 +48,31 @@ class Personality:
     uses_attachments: bool
     prompt_template: str
     defaults: dict = field(default_factory=dict)
+    feedback: dict | None = None
+
+
+_FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n(.*)\Z", re.DOTALL)
 
 
 def _parse(text: str, source: Path) -> Personality:
     if not text.startswith("---"):
         raise PersonalityError(f"{source}: missing YAML frontmatter delimited by '---'")
-    parts = text.split("---", 2)
-    # parts: ['', '<frontmatter>\n', '<body>']
-    if len(parts) < 3:
-        raise PersonalityError(f"{source}: malformed frontmatter (need opening and closing '---')")
-    meta = yaml.safe_load(parts[1]) or {}
-    body = parts[2].lstrip("\n")
+    m = _FRONTMATTER_RE.match(text)
+    if m is None:
+        raise PersonalityError(f"{source}: malformed frontmatter (need opening and closing '---' on their own lines)")
+    meta = yaml.safe_load(m.group(1)) or {}
+    body = m.group(2).lstrip("\n")
     name = meta.get("name") or source.stem
+    feedback = meta.get("feedback")
+    if feedback is not None and not isinstance(feedback, dict):
+        raise PersonalityError(f"{source}: 'feedback' must be a mapping if present")
     return Personality(
         name=name,
         description=meta.get("description", ""),
         uses_attachments=bool(meta.get("uses_attachments", False)),
         prompt_template=body,
         defaults=meta.get("defaults") or {},
+        feedback=feedback,
     )
 
 
@@ -112,6 +120,46 @@ def render(p: Personality, role: str, attachments_section: str) -> str:
         return p.prompt_template.format_map(_SafeMap(mapping))
     except (KeyError, IndexError) as e:
         raise PersonalityError(f"failed to render {p.name!r}: {e}") from e
+
+
+def has_feedback(p: Personality) -> bool:
+    if not p.feedback:
+        return False
+    if not p.feedback.get("template"):
+        return False
+    return bool(p.feedback.get("enabled", True))
+
+
+def render_feedback(
+    p: Personality,
+    *,
+    role: str,
+    attachments_section: str,
+    transcript: str,
+    turn_count: int,
+    started_at: str,
+    ended_at: str,
+) -> str:
+    if not has_feedback(p):
+        raise PersonalityError(
+            f"personality {p.name!r} has no feedback template (or it's disabled)"
+        )
+    template = p.feedback["template"]
+    mapping = {
+        "role": role,
+        "attachments_section": attachments_section,
+        "transcript": transcript,
+        "turn_count": str(turn_count),
+        "personality_name": p.name,
+        "started_at": started_at,
+        "ended_at": ended_at,
+    }
+    try:
+        return template.format_map(_SafeMap(mapping))
+    except (KeyError, IndexError) as e:
+        raise PersonalityError(
+            f"failed to render feedback template for {p.name!r}: {e}"
+        ) from e
 
 
 class _SafeMap(dict):

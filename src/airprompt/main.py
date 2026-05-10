@@ -5,6 +5,8 @@ Examples:
     python -m airprompt --role "AI Engineer"
     python -m airprompt --personality interviewer --role "Backend" --attach resume=cv.pdf
     python -m airprompt --continue ~/.local/share/airprompt/sessions/session-20260509-101500.json
+    python -m airprompt --feedback --role "Backend Engineer"
+    python -m airprompt --feedback-from ~/.local/share/airprompt/sessions/session-XXX.json
     python -m airprompt --list-personalities
     python -m airprompt --list-devices
 """
@@ -81,8 +83,50 @@ def main() -> None:
     parser.add_argument("--output-device", type=int, default=None, help="sounddevice output device index")
     parser.add_argument("--list-devices", action="store_true", help="List audio devices and exit")
     parser.add_argument("--list-personalities", action="store_true", help="List personalities and exit")
+    parser.add_argument(
+        "--feedback",
+        action="store_true",
+        help="Generate, speak, and save personality-driven feedback at the end of a live session (Ctrl+C).",
+    )
+    parser.add_argument(
+        "--feedback-from",
+        dest="feedback_from",
+        type=Path,
+        default=None,
+        metavar="SESSION.json",
+        help="Headless: read a saved session JSON, generate Markdown feedback, and exit. No mic/TTS.",
+    )
+    parser.add_argument(
+        "--feedback-out",
+        dest="feedback_out",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Where to write the feedback Markdown. Default: ~/.local/share/airprompt/feedback/feedback-{ts}.md",
+    )
     parser.add_argument("--log-level", default="WARNING", choices=["DEBUG", "INFO", "WARNING"])
     args = parser.parse_args()
+
+    # --feedback-from is mutually exclusive with live-mode flags (it's headless).
+    if args.feedback_from is not None:
+        conflicting = []
+        if args.continue_path is not None:
+            conflicting.append("--continue")
+        if args.role is not None:
+            conflicting.append("--role")
+        if args.attach is not None:
+            conflicting.append("--attach")
+        if args.input_device is not None:
+            conflicting.append("--input-device")
+        if args.output_device is not None:
+            conflicting.append("--output-device")
+        if args.feedback:
+            conflicting.append("--feedback")
+        if conflicting:
+            parser.error(
+                f"--feedback-from cannot be combined with: {', '.join(conflicting)} "
+                "(post-hoc feedback reads everything from the saved session)"
+            )
 
     logging.basicConfig(
         level=args.log_level,
@@ -94,6 +138,23 @@ def main() -> None:
         return
     if args.list_personalities:
         _list_personalities()
+        return
+
+    if args.feedback_from is not None:
+        from . import feedback as feedback_mod
+
+        try:
+            out = asyncio.run(
+                feedback_mod.run_post_hoc(
+                    session_path=args.feedback_from.expanduser(),
+                    out_path=args.feedback_out,
+                    personality_override=args.personality,
+                )
+            )
+        except FileNotFoundError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"\n\033[32m[feedback]\033[0m wrote {out}")
         return
 
     continue_path = args.continue_path
@@ -121,6 +182,8 @@ def main() -> None:
         continue_path=continue_path,
         input_device=args.input_device,
         output_device=args.output_device,
+        feedback_enabled=args.feedback,
+        feedback_out_path=args.feedback_out,
     )
     try:
         asyncio.run(orch.run())

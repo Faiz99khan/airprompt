@@ -134,23 +134,22 @@ class InterviewerLLM:
         async for _ in self._client.receive_response():
             pass  # consume; we don't speak the recap response yet
 
-    async def stream_reply(self, user_text: str) -> AsyncIterator[str]:
-        """Send `user_text` and yield assistant sentences as they become ready.
+    async def _stream_query_sentences(self, query_text: str) -> AsyncIterator[str]:
+        """Send `query_text` to Claude and yield assistant sentences as they arrive.
 
-        On cancellation (barge-in), the partial response accumulated so far is
-        still appended to history so context stays coherent.
+        After the iterator completes (or is cancelled), `self._last_full_text`
+        holds the full accumulated reply — callers that need it (history save,
+        feedback markdown write) read it from there.
         """
         from claude_agent_sdk import AssistantMessage, TextBlock
 
-        self.history.append(Turn(role="user", content=user_text))
-        self._save()
-
-        await self._client.query(user_text)
+        await self._client.query(query_text)
 
         buf = ""
         full_text = ""
         seen_text = ""
         yielded_any = False
+        self._last_full_text = ""
 
         try:
             async for msg in self._client.receive_response():
@@ -191,10 +190,47 @@ class InterviewerLLM:
             for s in sentences:
                 yield s
         finally:
-            tail = (full_text + buf).strip()
+            self._last_full_text = (full_text + buf).strip()
+
+    async def stream_reply(self, user_text: str) -> AsyncIterator[str]:
+        """Send `user_text` and yield assistant sentences as they become ready.
+
+        On cancellation (barge-in), the partial response accumulated so far is
+        still appended to history so context stays coherent.
+        """
+        self.history.append(Turn(role="user", content=user_text))
+        self._save()
+        try:
+            async for s in self._stream_query_sentences(user_text):
+                yield s
+        finally:
+            tail = self._last_full_text
             if tail:
                 self.history.append(Turn(role="assistant", content=tail))
                 self._save()
+
+    async def stream_feedback(self) -> AsyncIterator[str]:
+        """Yield sentences of a personality-driven feedback report.
+
+        Does NOT touch session.json — the feedback is its own artifact
+        (written to a Markdown file by the caller). After iteration completes,
+        the full Markdown is available as `self._last_full_text`.
+        """
+        from . import feedback as feedback_mod
+
+        turns = [
+            {"role": t.role, "content": t.content, "ts": t.ts}
+            for t in self.history
+        ]
+        attachments_section = render_attachments_section(self.attachments)
+        user_prompt = feedback_mod.render_feedback_prompt(
+            self.personality,
+            role=self.role,
+            attachments_section=attachments_section,
+            turns=turns,
+        )
+        async for s in self._stream_query_sentences(user_prompt):
+            yield s
 
     async def interrupt(self) -> None:
         """Abort the current Claude generation (used for barge-in)."""

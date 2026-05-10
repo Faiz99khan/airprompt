@@ -129,6 +129,65 @@ values for the resumed session.
 
 (`--resume` still works as a deprecated alias for one release; prefer `--continue`.)
 
+### Feedback reports
+
+Generate a personality-driven written debrief of a session — for the interviewer
+this covers strengths, weaknesses, communication (grammar / fluency / clarity),
+the single most important area to work on, and concrete practical advice. The
+template explicitly tells the model to **omit any section it cannot back with
+real evidence**, so honest short reports are preferred over padded ones.
+
+Two ways to use it:
+
+```bash
+# Live: speak the feedback at the end of the session AND save it to disk.
+# Trigger by Ctrl+C when you're done talking.
+python -m airprompt --feedback --role "Backend Engineer"
+
+# Post-hoc: generate a feedback file from any saved session JSON. Headless —
+# no mic, no TTS, no orchestrator. Useful for reviewing old sessions.
+python -m airprompt --feedback-from ~/.local/share/airprompt/sessions/session-20260509-101500.json
+
+# Both modes accept --feedback-out to choose the output path.
+python -m airprompt --feedback-from <session.json> --feedback-out ~/reports/today.md
+```
+
+Default output location: `~/.local/share/airprompt/feedback/feedback-{YYYYMMDD-HHMMSS}.md`.
+Each file gets a small HTML-comment header noting personality, role, source
+session, and generation time.
+
+`--feedback-from` is mutually exclusive with the live-mode flags
+(`--continue`, `--role`, `--attach`, `--input-device`, `--output-device`,
+`--feedback`) — post-hoc reads everything from the saved session. You may
+combine it with `--personality` to apply a different persona's feedback
+template against the saved transcript.
+
+The feedback template is part of the personality file. To enable feedback for a
+custom personality, add a `feedback:` block to its YAML frontmatter:
+
+```markdown
+---
+name: tutor
+defaults:
+  effort: xhigh
+feedback:
+  enabled: true
+  template: |
+    The tutoring session for {role} just ended after {turn_count} turns.
+
+    Transcript:
+    {transcript}
+
+    Write a candid debrief... (use markdown, omit empty sections, etc.)
+---
+```
+
+Available placeholders in the feedback template: `{role}`, `{transcript}`,
+`{turn_count}`, `{attachments_section}`, `{personality_name}`, `{started_at}`,
+`{ended_at}`. A personality without a `feedback:` block raises a clear error
+when feedback is requested rather than falling back to a generic template.
+
+
 ### Other flags
 
 ```
@@ -136,6 +195,9 @@ values for the resumed session.
 --role STR                role/topic injected into the personality template
 --attach [LABEL=]PATH     attach a personal file; repeatable
 --continue PATH           resume a prior session JSON
+--feedback                live mode: speak + save feedback at session end
+--feedback-from PATH      post-hoc: generate feedback for a saved session JSON
+--feedback-out PATH       where to write feedback markdown (default: ~/.local/share/airprompt/feedback/)
 --list-personalities      list available personalities and exit
 --list-devices            list audio devices
 --input-device N          pick mic by index
@@ -166,6 +228,7 @@ src/airprompt/
   llm.py             Agent SDK + sentence splitter + persona + history
   personality.py     load / parse / render personality presets
   attachments.py     load .txt/.md/.pdf into the prompt
+  feedback.py        post-hoc + live feedback report generation
   personalities/     packaged default presets (auto-copied to ~/.config/airprompt/)
     interviewer.md
   orchestrator.py    state machine + queues + tasks

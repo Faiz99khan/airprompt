@@ -29,8 +29,9 @@ import numpy as np
 
 from .attachments import load_attachment
 from .audio_io import AudioCapture, AudioPlayback
+from .feedback import default_feedback_path, write_feedback_file
 from .llm import InterviewerLLM
-from .personality import bootstrap_user_dir, load as load_personality
+from .personality import bootstrap_user_dir, has_feedback, load as load_personality
 from .stt import Transcriber
 from .tts import Synthesizer
 from .vad import Endpointer
@@ -53,6 +54,8 @@ class Orchestrator:
         continue_path: Path | None = None,
         input_device: int | None = None,
         output_device: int | None = None,
+        feedback_enabled: bool = False,
+        feedback_out_path: Path | None = None,
     ) -> None:
         bootstrap_user_dir()
         self.personality = load_personality(personality_name)
@@ -67,6 +70,14 @@ class Orchestrator:
         self.continue_path = continue_path
         self.input_device = input_device
         self.output_device = output_device
+        self.feedback_enabled = feedback_enabled
+        self.feedback_out_path = feedback_out_path
+        if self.feedback_enabled and not has_feedback(self.personality):
+            log.warning(
+                "--feedback requested but personality %r has no feedback template; "
+                "feedback turn will be skipped",
+                self.personality.name,
+            )
 
         self.state = State.LISTENING
         self._state_lock = asyncio.Lock()
@@ -78,6 +89,7 @@ class Orchestrator:
         self._llm: InterviewerLLM | None = None
         self._synth: Synthesizer | None = None
         self._playback: AudioPlayback | None = None
+        self._feedback_in_progress = False
 
     async def _set_state(self, new: State) -> None:
         async with self._state_lock:
@@ -200,6 +212,86 @@ class Orchestrator:
             synth_task.cancel()
             await asyncio.gather(prod_task, synth_task, return_exceptions=True)
 
+    async def _run_feedback_turn(self) -> None:
+        """Generate, speak, and save personality-driven feedback. Mic is dead."""
+        assert self._llm and self._synth and self._playback
+        if not has_feedback(self.personality):
+            log.info("feedback skipped: personality has no feedback template")
+            return
+        if not self._llm.history:
+            log.info("feedback skipped: empty history")
+            return
+
+        self._feedback_in_progress = True
+        print("\n\033[35m[feedback]\033[0m generating…", flush=True)
+        t0 = time.perf_counter()
+
+        sentence_q: asyncio.Queue[str | None] = asyncio.Queue(maxsize=8)
+        audio_q: asyncio.Queue[tuple[str, np.ndarray] | None] = asyncio.Queue(maxsize=2)
+
+        async def produce() -> None:
+            try:
+                async for sentence in self._llm.stream_feedback():
+                    await sentence_q.put(sentence)
+            finally:
+                try:
+                    sentence_q.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
+
+        async def synthesize() -> None:
+            try:
+                while True:
+                    sentence = await sentence_q.get()
+                    if sentence is None:
+                        break
+                    audio = await asyncio.to_thread(self._synth.synth, sentence)
+                    await audio_q.put((sentence, audio))
+            finally:
+                try:
+                    audio_q.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
+
+        prod_task = asyncio.create_task(produce(), name="feedback-produce")
+        synth_task = asyncio.create_task(synthesize(), name="feedback-synth")
+
+        try:
+            print("\033[35m[feedback]\033[0m ", end="", flush=True)
+            while True:
+                item = await audio_q.get()
+                if item is None:
+                    break
+                sentence, audio = item
+                print(sentence + " ", end="", flush=True)
+                if audio.size == 0:
+                    continue
+                self._playback.play(audio)
+            print()
+            await self._playback.wait_drained()
+            log.info("[feedback] elapsed %.1fs", time.perf_counter() - t0)
+        finally:
+            prod_task.cancel()
+            synth_task.cancel()
+            await asyncio.gather(prod_task, synth_task, return_exceptions=True)
+
+        markdown = (self._llm._last_full_text or "").strip()
+        if not markdown:
+            log.warning("feedback completed with empty body; nothing to write")
+            self._feedback_in_progress = False
+            return
+
+        out_path = self.feedback_out_path or default_feedback_path()
+        written = write_feedback_file(
+            out_path,
+            markdown,
+            personality_name=self.personality.name,
+            role=self.role,
+            source_session=self._llm.session_path,
+        )
+        print(f"\033[32m[feedback]\033[0m wrote {written}")
+        self._feedback_in_progress = False
+
     async def _barge_in(self) -> None:
         if self._turn_task is None or self._turn_task.done():
             # state is THINKING/SPEAKING but no turn task — nothing to cancel; just reset.
@@ -270,5 +362,16 @@ class Orchestrator:
                 for t in tasks:
                     t.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                # Stop the mic before generating feedback — we don't want to
+                # capture during the report turn. Playback stays alive so TTS
+                # can speak the feedback.
                 capture.stop()
+                if self.feedback_enabled and not self._feedback_in_progress:
+                    try:
+                        await self._run_feedback_turn()
+                    except KeyboardInterrupt:
+                        # Second Ctrl+C during feedback — give up cleanly.
+                        print("\n[feedback] interrupted")
+                    except Exception:  # noqa: BLE001
+                        log.exception("feedback turn failed")
                 self._playback.stop()
