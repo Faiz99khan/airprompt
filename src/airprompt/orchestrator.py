@@ -208,8 +208,19 @@ class Orchestrator:
             log.info("turn cancelled (barge-in)")
             raise
         finally:
-            prod_task.cancel()
+            # Synthesis is local work on a private queue — safe to drop.
+            # The LLM producer must NOT be: after a barge-in it's draining
+            # the interrupted Claude stream to its ResultMessage, and cutting
+            # that short desyncs every later turn. Let it finish (bounded).
             synth_task.cancel()
+            if not prod_task.done():
+                try:
+                    await asyncio.wait_for(prod_task, timeout=5.0)
+                except asyncio.TimeoutError:
+                    log.warning("LLM stream drain timed out; cancelling (next turn may desync)")
+                    prod_task.cancel()
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
             await asyncio.gather(prod_task, synth_task, return_exceptions=True)
 
     async def _run_feedback_turn(self) -> None:

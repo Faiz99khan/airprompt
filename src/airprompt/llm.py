@@ -88,6 +88,10 @@ class InterviewerLLM:
             self.session_path = session_path or new_session_path()
         self._client = None
         self._client_ctx = None
+        # Set by interrupt() on barge-in. While true, _stream_query_sentences
+        # stops yielding but keeps consuming the SDK stream to its
+        # ResultMessage, so the next turn doesn't inherit stale messages.
+        self._interrupted = False
 
     async def __aenter__(self) -> "InterviewerLLM":
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
@@ -143,6 +147,7 @@ class InterviewerLLM:
         """
         from claude_agent_sdk import AssistantMessage, TextBlock
 
+        self._interrupted = False
         await self._client.query(query_text)
 
         buf = ""
@@ -153,6 +158,13 @@ class InterviewerLLM:
 
         try:
             async for msg in self._client.receive_response():
+                # On barge-in we stop processing/yielding but keep consuming
+                # the stream to its ResultMessage. A half-read stream leaves
+                # this turn's tail buffered in the SDK, and the next turn's
+                # receive_response() would read it instead of its own reply —
+                # shifting every later response one turn behind.
+                if self._interrupted:
+                    continue
                 new_text = ""
                 if isinstance(msg, AssistantMessage):
                     pieces = []
@@ -183,12 +195,15 @@ class InterviewerLLM:
                 min_len = 5 if not yielded_any else 40
                 sentences, buf = emit_sentences(buf, min_len=min_len, force_flush=False)
                 for s in sentences:
+                    if self._interrupted:
+                        break
                     yielded_any = True
                     yield s
 
-            sentences, buf = emit_sentences(buf, min_len=1, force_flush=True)
-            for s in sentences:
-                yield s
+            if not self._interrupted:
+                sentences, buf = emit_sentences(buf, min_len=1, force_flush=True)
+                for s in sentences:
+                    yield s
         finally:
             self._last_full_text = (full_text + buf).strip()
 
@@ -233,7 +248,14 @@ class InterviewerLLM:
             yield s
 
     async def interrupt(self) -> None:
-        """Abort the current Claude generation (used for barge-in)."""
+        """Abort the current Claude generation (used for barge-in).
+
+        Sets `_interrupted` so the in-flight `_stream_query_sentences` stops
+        yielding sentences but keeps draining the SDK stream to its
+        ResultMessage. The drain is what keeps turns aligned — see the note
+        in `_stream_query_sentences`.
+        """
+        self._interrupted = True
         if self._client is None:
             return
         try:

@@ -1,5 +1,9 @@
 temp*.ipynb
 *.pyc
 __pycache__/
+src/airprompt/personalities/
+!src/airprompt/personalities/interviewer.md
+*.egg-info/
+
 
 

@@ -15,10 +15,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import logging
 import sys
 from pathlib import Path
 
+from .logging_setup import setup_logging
 from .orchestrator import Orchestrator
 from .personality import bootstrap_user_dir, describe_all
 
@@ -128,10 +128,7 @@ def main() -> None:
                 "(post-hoc feedback reads everything from the saved session)"
             )
 
-    logging.basicConfig(
-        level=args.log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    setup_logging(args.log_level)
 
     if args.list_devices:
         _list_devices()
