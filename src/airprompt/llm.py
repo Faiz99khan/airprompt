@@ -17,7 +17,10 @@ from .personality import Personality, render as render_personality
 
 log = logging.getLogger(__name__)
 
-MODEL = "claude-opus-4-7"
+
+# MODEL = "claude-opus-4-8"
+MODEL = "claude-fable-5"
+# MODEL = "claude-sonnet-5"
 SESSIONS_DIR = Path.home() / ".local/share/airprompt/sessions"
 
 
@@ -92,8 +95,20 @@ class InterviewerLLM:
         # stops yielding but keeps consuming the SDK stream to its
         # ResultMessage, so the next turn doesn't inherit stale messages.
         self._interrupted = False
+        # Set via mark_desynced() when a turn had to abandon the SDK stream
+        # mid-response (drain timed out). The abandoned response's tail is
+        # still buffered in the SDK, so the next query on this client would
+        # read that instead of its own reply — shifting every later turn one
+        # behind. _ensure_synced() rebuilds the client before the next query.
+        self._desynced = False
 
     async def __aenter__(self) -> "InterviewerLLM":
+        await self._open_client()
+        if self.history:
+            await self._replay_history()
+        return self
+
+    async def _open_client(self) -> None:
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
         effort = self.personality.defaults.get("effort", "xhigh")
@@ -111,9 +126,26 @@ class InterviewerLLM:
             model, self.personality.name, self.role, len(self.attachments),
         )
         log.debug("system prompt:\n%s", self._system_prompt)
+
+    def mark_desynced(self) -> None:
+        """Record that the current SDK stream was abandoned mid-response."""
+        self._desynced = True
+
+    async def _ensure_synced(self) -> None:
+        """Rebuild the SDK client if a previous turn abandoned its stream."""
+        if not self._desynced:
+            return
+        log.warning("previous stream was abandoned mid-response; reopening Claude session")
+        try:
+            await self._client_ctx.__aexit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            log.exception("closing desynced client failed; opening a fresh one anyway")
+        self._client = None
+        self._client_ctx = None
+        await self._open_client()
         if self.history:
             await self._replay_history()
-        return self
+        self._desynced = False
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if self._client_ctx is not None:
@@ -125,12 +157,14 @@ class InterviewerLLM:
         """Tell Claude about prior turns so it can resume context."""
         transcript_lines = []
         for turn in self.history:
-            speaker = "Candidate" if turn.role == "user" else "Interviewer"
+            speaker = (
+                "Candidate" if turn.role == "user" else self.personality.assistant_label
+            )
             transcript_lines.append(f"{speaker}: {turn.content}")
         recap = (
-            "We are resuming an in-progress interview. Here is the prior transcript:\n\n"
+            "We are resuming an in-progress session. Here is the prior transcript:\n\n"
             + "\n".join(transcript_lines)
-            + "\n\nContinue the interview from here with your next question. "
+            + "\n\nContinue from here with your next question. "
             "Acknowledge briefly that we're picking back up, then ask."
         )
         log.info("replaying %d prior turns", len(self.history))
@@ -213,6 +247,7 @@ class InterviewerLLM:
         On cancellation (barge-in), the partial response accumulated so far is
         still appended to history so context stays coherent.
         """
+        await self._ensure_synced()
         self.history.append(Turn(role="user", content=user_text))
         self._save()
         try:
@@ -233,6 +268,7 @@ class InterviewerLLM:
         """
         from . import feedback as feedback_mod
 
+        await self._ensure_synced()
         turns = [
             {"role": t.role, "content": t.content, "ts": t.ts}
             for t in self.history

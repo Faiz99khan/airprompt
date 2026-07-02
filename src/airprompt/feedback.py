@@ -49,14 +49,20 @@ def load_saved_session(path: Path) -> dict:
     return data
 
 
-def format_transcript(turns: Iterable[dict]) -> str:
-    """Render saved-session turns as 'Candidate: ...' / 'Interviewer: ...' lines."""
+def format_transcript(turns: Iterable[dict], assistant_label: str = "Interviewer") -> str:
+    """Render saved-session turns as speaker-labelled lines.
+
+    Candidate turns carry a word count so feedback templates can make grounded
+    concision claims — the transcript has no audio durations to offer instead.
+    """
     lines = []
     for t in turns:
         role = t.get("role", "user")
-        speaker = "Candidate" if role == "user" else "Interviewer"
         content = (t.get("content") or "").strip()
-        lines.append(f"{speaker}: {content}")
+        if role == "user":
+            lines.append(f"Candidate ({len(content.split())} words): {content}")
+        else:
+            lines.append(f"{assistant_label}: {content}")
     return "\n".join(lines)
 
 
@@ -77,7 +83,7 @@ def render_feedback_prompt(
 
     Both live and post-hoc paths funnel through here so the wording matches.
     """
-    transcript = format_transcript(turns)
+    transcript = format_transcript(turns, assistant_label=p.assistant_label)
     started = _ts_to_iso(turns[0].get("ts") if turns else None)
     ended = _ts_to_iso(turns[-1].get("ts") if turns else None)
     return render_feedback(

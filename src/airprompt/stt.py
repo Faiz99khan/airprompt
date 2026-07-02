@@ -12,6 +12,12 @@ log = logging.getLogger(__name__)
 MODEL_NAME = "large-v3"
 SAMPLE_RATE = 16_000
 
+# Whisper's decoder normalizes disfluencies away — "um"/"uh" and stutters
+# rarely survive into the text. Seeding the prompt with fillers biases it
+# toward verbatim output, which the coaching personalities depend on.
+# Pass initial_prompt=None to get Whisper's default cleaned-up transcription.
+VERBATIM_PROMPT = "Umm, let me think like, hmm... Okay, here's what I'm, like, thinking."
+
 
 class Transcriber:
     def __init__(
@@ -20,6 +26,7 @@ class Transcriber:
         device: str = "cuda",
         compute_type: str = "float16",
         language: str = "en",
+        initial_prompt: str | None = VERBATIM_PROMPT,
     ) -> None:
         from faster_whisper import WhisperModel
 
@@ -28,6 +35,7 @@ class Transcriber:
         self._model = WhisperModel(model_name, device=device, compute_type=compute_type)
         log.info("faster-whisper loaded in %.2fs", time.perf_counter() - t0)
         self._language = language
+        self._initial_prompt = initial_prompt
 
     def transcribe(self, audio_int16: np.ndarray) -> str:
         """Transcribe int16 mono audio at 16 kHz. Returns concatenated text."""
@@ -39,6 +47,7 @@ class Transcriber:
             audio_f32,
             beam_size=1,
             language=self._language,
+            initial_prompt=self._initial_prompt,
             vad_filter=False,           # already gated by Silero VAD
             condition_on_previous_text=False,
         )

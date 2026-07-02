@@ -133,8 +133,13 @@ class Orchestrator:
                 continue
             print(f"\n\033[36m[you]\033[0m {text}")
 
-            # cancel any prior turn (rare — would mean STT fired during a previous turn)
+            # cancel any prior turn (rare — would mean STT fired during a previous turn).
+            # Interrupt the LLM first so the cancelled turn's stream drain is
+            # short — cancelling without interrupt leaves Claude generating,
+            # and the drain would have to consume the whole remaining reply.
             if self._turn_task and not self._turn_task.done():
+                if self._llm is not None:
+                    await self._llm.interrupt()
                 self._turn_task.cancel()
                 try:
                     await self._turn_task
@@ -211,16 +216,30 @@ class Orchestrator:
             # Synthesis is local work on a private queue — safe to drop.
             # The LLM producer must NOT be: after a barge-in it's draining
             # the interrupted Claude stream to its ResultMessage, and cutting
-            # that short desyncs every later turn. Let it finish (bounded).
+            # that short desyncs every later turn. With synth gone, the
+            # producer may be parked on a full sentence_q — keep the queue
+            # moving while we wait, or the drain could never finish.
             synth_task.cancel()
             if not prod_task.done():
+
+                async def _keep_draining() -> None:
+                    while await sentence_q.get() is not None:
+                        pass
+
+                drain_task = asyncio.create_task(_keep_draining(), name="turn-drain")
                 try:
                     await asyncio.wait_for(prod_task, timeout=5.0)
                 except asyncio.TimeoutError:
-                    log.warning("LLM stream drain timed out; cancelling (next turn may desync)")
-                    prod_task.cancel()
+                    log.warning(
+                        "LLM stream drain timed out; session will reconnect before the next turn"
+                    )
+                    self._llm.mark_desynced()
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
+                    if not prod_task.done():
+                        prod_task.cancel()
+                        self._llm.mark_desynced()
+                finally:
+                    drain_task.cancel()
             await asyncio.gather(prod_task, synth_task, return_exceptions=True)
 
     async def _run_feedback_turn(self) -> None:

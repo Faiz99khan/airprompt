@@ -8,6 +8,8 @@ portfolio brief, study notes — `.txt` / `.md` / `.pdf`).
 All speech models are open source and run locally on GPU. The LLM uses the Claude
 Agent SDK piggybacking on your existing `claude` CLI auth (Pro subscription works).
 
+> Want to understand how the code flows? See [docs/FLOW.md](docs/FLOW.md) — four diagrams (architecture, state machine, sequence, queue topology) that get you to a working mental model in ~15 minutes.
+
 ## Stack
 
 | Layer | Choice |

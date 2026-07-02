@@ -49,6 +49,10 @@ class Personality:
     prompt_template: str
     defaults: dict = field(default_factory=dict)
     feedback: dict | None = None
+    # How the assistant is labelled in transcripts (history replay, feedback).
+    # Frontmatter key `assistant_label`; e.g. the coach sets "Coach" so the
+    # transcript matches its template's "Coach = you".
+    assistant_label: str = "Interviewer"
 
 
 _FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n(.*)\Z", re.DOTALL)
@@ -73,6 +77,7 @@ def _parse(text: str, source: Path) -> Personality:
         prompt_template=body,
         defaults=meta.get("defaults") or {},
         feedback=feedback,
+        assistant_label=str(meta.get("assistant_label") or "Interviewer"),
     )
 
 
