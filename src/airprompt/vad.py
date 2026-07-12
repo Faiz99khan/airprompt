@@ -49,7 +49,7 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-SILENCE_MS = _env_int("AIRPROMPT_SILENCE_MS", 800)
+SILENCE_MS = _env_int("AIRPROMPT_SILENCE_MS", 3500)
 START_THRESHOLD = _env_float("AIRPROMPT_VAD_START_THRESHOLD", 0.5)
 END_THRESHOLD = _env_float("AIRPROMPT_VAD_END_THRESHOLD", 0.35)
 START_FRAMES = _env_int("AIRPROMPT_VAD_START_FRAMES", 3)
